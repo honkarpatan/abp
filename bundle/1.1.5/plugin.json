@@ -1,0 +1,19 @@
+{
+  "id": "acode.plugin.androidbuilder",
+  "name": "Android Builder Pro",
+  "main": "dist/main.js",
+  "version": "1.1.5",
+  "readme": "readme.md",
+  "icon": "icon.png",
+  "license": "MIT",
+  "files": [],
+  "keywords": ["Android","Xml","Viewer","Apk","Builder","flutter preview" , "flutter build","android icon"],
+  "price": 80,
+  "minVersionCode": 290,
+  "author": {
+    "name": "Dev. Sourav",
+    "email": "devs.sourav@gmail.com",
+    "url": "",
+    "github": ""
+  }
+}
