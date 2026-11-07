@@ -158,7 +158,7 @@ export const navDrawerFiles = {
         android:layout_height="wrap_content"
         android:contentDescription="Nav Header"
         android:paddingTop="8dp"
-        app:srcCompat="@drawable/ic_launcher_round" />
+        app:srcCompat="@mipmap/ic_launcher_round" />
 
     <TextView
         android:layout_width="match_parent"
