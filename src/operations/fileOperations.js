@@ -341,11 +341,48 @@ export async function createFolder(url, folderName, options = { overwrite: false
  * Create a new file
  * @param {string} url - Parent directory URL
  * @param {string} fileName - Name of the file
- * @param {string|ArrayBuffer} content - File content
- * @param {Object} options - { overwrite: boolean } (Default: false aka "Keep Both")
+ * @param {string|ArrayBuffer|Uint8Array} content - File content
+ * @param {Object} options - { overwrite: boolean, encoding?: 'utf-8'|'base64' }
  */
 export async function createFile(url, fileName, content = '', options = { overwrite: false }) {
   try {
+    const encoding = options && options.encoding ? options.encoding : null;
+
+    const write = async (fileUrl, data) => {
+      if (encoding) {
+        try {
+          await fs(fileUrl).writeFile(data, encoding);
+          return;
+        } catch (_) {
+          await fs(fileUrl).writeFile(data, { encoding });
+        }
+      } else {
+        await fs(fileUrl).writeFile(data);
+      }
+    };
+
+    const create = async (parentUrl, name, data) => {
+      if (encoding) {
+        try {
+          await fs(parentUrl).createFile(name, data, { encoding });
+          return;
+        } catch (_) {
+          try {
+            await fs(parentUrl).createFile(name, data, encoding);
+            return;
+          } catch (__) {
+            // create then overwrite with encoding
+            try {
+              await fs(parentUrl).createFile(name, '');
+            } catch (___) {}
+            await write(`${String(parentUrl).replace(/\/+$/, '')}/${name}`, data);
+          }
+        }
+      } else {
+        await fs(parentUrl).createFile(name, data);
+      }
+    };
+
     // 1. Check if file exists
     let existingItem = null;
     try {
@@ -356,29 +393,27 @@ export async function createFile(url, fileName, content = '', options = { overwr
     // 2. Logic based on overwrite flag
     if (existingItem) {
         if (options.overwrite) {
-            // Option A: Replace (Overwrite content)
-            console.log(`♻️ Overwriting file: ${fileName}`);
-            await fs(existingItem.url).writeFile(content);
+            console.log(`♻️ Overwriting file: ${fileName}${encoding ? ' [' + encoding + ']' : ''}`);
+            await write(existingItem.url, content);
             return {
                 success: true,
                 url: existingItem.url,
                 message: `File "${fileName}" updated`
             };
         } else {
-            // Option B: Keep Both (Rename new one like "file (1).txt")
             const uniqueName = await getUniqueName(url, fileName);
             console.log(`✨ Creating duplicate: ${uniqueName}`);
-            await fs(url).createFile(uniqueName, content);
+            await create(url, uniqueName, content);
             return {
                 success: true,
-                url: `${url}/${uniqueName}`, // Approximate URL
+                url: `${url}/${uniqueName}`,
                 message: `File created as "${uniqueName}"`
             };
         }
     }
 
     // 3. Create normal file (No conflict)
-    await fs(url).createFile(fileName, content);
+    await create(url, fileName, content);
     return {
       success: true,
       url: `${url}/${fileName}`,
@@ -390,6 +425,177 @@ export async function createFile(url, fileName, content = '', options = { overwr
     return { success: false, url: null, message: error.message };
   }
 }
+
+/**
+ * Write binary bytes (PNG/WebP/JPEG) for Acode FS.
+ *
+ * CRITICAL (Acode SDcard plugin):
+ *   sdcard.write(filename, content, isArrayBuffer)
+ *   - isArrayBuffer ONLY when content instanceof ArrayBuffer
+ *   - native side Base64-decodes when isArrayBuffer=true
+ *   - Uint8Array / Blob / base64-string → treated as TEXT → corrupt PNG
+ *
+ *   writeFile(string, 'base64') is NOT base64-decode — it is charset encode!
+ *   Always pass a pure ArrayBuffer and NO encoding flag.
+ */
+export async function writeBinaryFile(folderUrl, fileName, data, options = {}) {
+  const dirUrl = String(folderUrl || '').replace(/\/+$/, '');
+  const full = `${dirUrl}/${fileName}`;
+
+  let u8;
+  if (data instanceof Uint8Array) {
+    u8 = data;
+  } else if (data instanceof ArrayBuffer) {
+    u8 = new Uint8Array(data);
+  } else if (ArrayBuffer.isView(data)) {
+    u8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  } else {
+    return { success: false, url: null, message: 'empty/invalid binary buffer: ' + fileName };
+  }
+  if (!u8.byteLength) {
+    return { success: false, url: null, message: 'empty binary buffer: ' + fileName };
+  }
+
+  // Detached pure ArrayBuffer (NOT a view) — required for content:// binary path
+  const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+
+  const isPng =
+    u8.length >= 4 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47;
+  const isJpg = u8.length >= 2 && u8[0] === 0xff && u8[1] === 0xd8;
+  const isWebp =
+    u8.length >= 12 &&
+    u8[0] === 0x52 &&
+    u8[1] === 0x49 &&
+    u8[2] === 0x46 &&
+    u8[3] === 0x46 &&
+    u8[8] === 0x57 &&
+    u8[9] === 0x45;
+  if (!(isPng || isJpg || isWebp)) {
+    console.warn(
+      '[writeBinary] unexpected magic',
+      fileName,
+      u8[0],
+      u8[1],
+      u8[2],
+      u8[3]
+    );
+  }
+
+  const fsOp = () => {
+    try {
+      return (typeof acode !== 'undefined' && (acode.require('fs') || acode.require('fsOperation'))) || null;
+    } catch (_) {
+      return null;
+    }
+  };
+  const fs = fsOp();
+  if (!fs) return { success: false, url: null, message: 'fs API unavailable' };
+
+  const verify = async () => {
+    try {
+      // Prefer raw ArrayBuffer read (no encoding)
+      let raw = null;
+      try {
+        raw = await fs(full).readFile();
+      } catch (_) {}
+      let bytes = null;
+      if (raw instanceof ArrayBuffer) {
+        bytes = new Uint8Array(raw);
+      } else if (ArrayBuffer.isView(raw)) {
+        bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+      } else if (raw && raw.data instanceof ArrayBuffer) {
+        bytes = new Uint8Array(raw.data);
+      } else if (typeof raw === 'string') {
+        // Text on disk = corrupt for PNG. Detect base64-as-text mistake.
+        if (raw.startsWith('iVBOR') || raw.startsWith('/9j/') || raw.startsWith('UklGR')) {
+          console.warn('[writeBinary] file is base64 TEXT, not binary:', fileName);
+          return false;
+        }
+        // Maybe latin1 binary string
+        bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i) & 0xff;
+      }
+      if (!bytes || bytes.length < 4) return false;
+      if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
+      if (bytes[0] === 0xff && bytes[1] === 0xd8) return true;
+      if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) return true;
+      // ASCII "PNG" or "iVBO" means text corruption
+      if (bytes[0] === 0x69 && bytes[1] === 0x56 && bytes[2] === 0x42) {
+        console.warn('[writeBinary] looks like ASCII iVBOR text on disk');
+        return false;
+      }
+      console.warn('[writeBinary] verify magic fail', fileName, bytes[0], bytes[1], bytes[2], bytes[3]);
+      return false;
+    } catch (e) {
+      console.warn('[writeBinary] verify error', e);
+      return false;
+    }
+  };
+
+  // Delete stale file so create+write is clean
+  try {
+    if (await fs(full).exists().catch(() => false)) {
+      try {
+        await fs(full).delete();
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  const attempts = [
+    // 1) create empty then write ArrayBuffer (best for content://)
+    async () => {
+      try {
+        await fs(dirUrl).createFile(fileName, '');
+      } catch (_) {
+        // may already exist
+      }
+      await fs(full).writeFile(ab); // NO encoding — pure ArrayBuffer
+    },
+    // 2) overwrite existing with ArrayBuffer
+    async () => {
+      const exists = await fs(full).exists().catch(() => false);
+      if (exists) {
+        await fs(full).writeFile(ab);
+      } else {
+        await fs(dirUrl).createFile(fileName, ab);
+      }
+    },
+    // 3) createFile with ArrayBuffer content directly
+    async () => {
+      await fs(dirUrl).createFile(fileName, ab);
+    },
+    // 4) fileOperations createFile helper
+    async () => {
+      const r = await createFile(dirUrl, fileName, ab, { overwrite: true });
+      if (!r || !r.success) throw new Error(r && r.message ? r.message : 'createFile failed');
+    },
+  ];
+
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      await attempts[i]();
+      const ok = await verify();
+      if (ok) {
+        console.log('[writeBinary] OK', fileName, 'attempt', i + 1, 'bytes', u8.length);
+        return { success: true, url: full, message: `Binary OK: ${fileName}` };
+      }
+      lastErr = new Error('verify failed after write attempt ' + (i + 1) + ': ' + fileName);
+      console.warn(lastErr.message);
+    } catch (e) {
+      lastErr = e;
+      console.warn('[writeBinary] attempt', i + 1, e && e.message ? e.message : e);
+    }
+  }
+
+  return {
+    success: false,
+    url: full,
+    message: (lastErr && lastErr.message) || 'binary write failed: ' + fileName,
+  };
+}
+
+
 
 
 

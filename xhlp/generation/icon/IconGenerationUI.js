@@ -196,7 +196,7 @@ export class IconGenerationUI {
             <span style="color:#FFB74D;">⚠️</span> Generates
             <code>mipmap-*/ic_launcher.png</code> &amp;
             <code>ic_launcher_round.png</code>,
-            removes adaptive XML conflicts, sets manifest to <code>@mipmap</code>.
+            removes adaptive conflicts, rewrites layouts/manifest to <code>@mipmap</code>, adds drawable aliases.
           </div>
 
           <div id="gen-file-list" class="gen-file-list"></div>
@@ -400,7 +400,18 @@ export class IconGenerationUI {
           window.toast('Icons updated successfully!', 3000);
         }
         try { notifyIconUpdated(this.projectRoot); } catch (_) {}
-        this.editorFile.remove();
+        // Keep Icon Studio open so user can tweak / re-export without reopening
+        genBtn.innerText = 'Set Icon';
+        genBtn.disabled = false;
+        genBtn.classList.remove('btn-disabled-processing');
+        // leave progress visible briefly then soft-reset
+        setTimeout(() => {
+          try {
+            progressWrapper.style.display = 'none';
+            progressBar.style.width = '0%';
+            statusText.innerText = 'Ready — change options and Set Icon again anytime';
+          } catch (_) {}
+        }, 1800);
       } catch (err) {
         console.error('Icon Gen Error:', err);
         window.alert('Error: ' + (err.message || err));
@@ -761,36 +772,123 @@ export class IconGenerationUI {
     const u8 = arrayBuffer instanceof Uint8Array
       ? arrayBuffer
       : new Uint8Array(arrayBuffer);
+    if (!u8 || !u8.byteLength) throw new Error('empty PNG buffer: ' + fileName);
+
+    // PNG magic: 89 50 4E 47
+    if (!(u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47)) {
+      console.warn('[icon] buffer missing PNG magic for', fileName, u8[0], u8[1]);
+    }
+
+    const dirUrl = String(folderUrl).replace(/\/+$/, '');
+    const full = dirUrl + '/' + fileName;
+
     let binary = '';
     const step = 0x8000;
     for (let i = 0; i < u8.length; i += step) {
       binary += String.fromCharCode.apply(null, u8.subarray(i, i + step));
     }
     const b64 = btoa(binary);
-    // Prefer base64 encoding so later reads stay valid
-    try {
-      const full = String(folderUrl).replace(/\/+$/, '') + '/' + fileName;
-      if (await fs(full).exists()) {
+
+    const verifyPng = async () => {
+      try {
+        // Prefer base64 read — if FS stored raw bytes correctly this returns iVBOR…
+        let raw = null;
         try {
-          await fs(full).writeFile(b64, 'base64');
-          return;
-        } catch (_) {
+          raw = await fs(full).readFile('base64');
+        } catch (_) {}
+        if (typeof raw === 'string') {
+          const t = raw.replace(/\s/g, '');
+          // Valid PNG base64 starts with iVBOR
+          if (t.startsWith('iVBOR')) return true;
+          // Corrupted UTF-8 read of PNG often starts with /VBORw
+          if (t.startsWith('/VBORw') || t.startsWith('iVBORw0KGgo') === false && t.length < 32) {
+            return false;
+          }
+          // If we got long base64 that decodes to PNG magic, accept
           try {
-            await fs(full).writeFile(b64, { encoding: 'base64' });
-            return;
-          } catch (__) {}
+            const bin = atob(t.slice(0, 16));
+            if (bin.charCodeAt(0) === 0x89 && bin.charCodeAt(1) === 0x50) return true;
+          } catch (_) {}
+          return t.startsWith('iVBOR');
         }
+        // ArrayBuffer path
+        try {
+          const ab = await fs(full).readFile();
+          const b = ab instanceof ArrayBuffer ? new Uint8Array(ab)
+            : ArrayBuffer.isView(ab) ? new Uint8Array(ab.buffer, ab.byteOffset, ab.byteLength)
+            : null;
+          if (b && b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+            return true;
+          }
+        } catch (_) {}
+      } catch (_) {}
+      return null; // unknown — don't fail hard
+    };
+
+    const attempts = [
+      // 1) Raw Uint8Array / ArrayBuffer (best for content:// binary)
+      async () => {
+        const exists = await fs(full).exists().catch(() => false);
+        if (exists) {
+          await fs(full).writeFile(u8);
+        } else {
+          await fs(dirUrl).createFile(fileName, u8);
+        }
+      },
+      async () => {
+        const exists = await fs(full).exists().catch(() => false);
+        const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+        if (exists) await fs(full).writeFile(ab);
+        else await fs(dirUrl).createFile(fileName, ab);
+      },
+      // 2) Blob
+      async () => {
+        const blob = new Blob([u8], { type: 'image/png' });
+        const exists = await fs(full).exists().catch(() => false);
+        if (exists) await fs(full).writeFile(blob);
+        else await fs(dirUrl).createFile(fileName, blob);
+      },
+      // 3) base64 WITH encoding flag only (never plain base64 string as utf-8)
+      async () => {
+        const exists = await fs(full).exists().catch(() => false);
+        if (exists) {
+          try {
+            await fs(full).writeFile(b64, 'base64');
+            return;
+          } catch (_) {
+            await fs(full).writeFile(b64, { encoding: 'base64' });
+          }
+        } else {
+          try {
+            await fs(dirUrl).createFile(fileName, b64, { encoding: 'base64' });
+          } catch (_) {
+            await fs(dirUrl).createFile(fileName, b64, 'base64');
+          }
+        }
+      },
+      // 4) fileOperations helper with ArrayBuffer
+      async () => {
+        await createFile(dirUrl, fileName, u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength), {
+          overwrite: true,
+        });
+      },
+    ];
+
+    let lastErr = null;
+    for (const fn of attempts) {
+      try {
+        await fn();
+        const ok = await verifyPng();
+        if (ok === false) {
+          lastErr = new Error('PNG magic verify failed after write: ' + fileName);
+          continue; // try next strategy
+        }
+        return; // success (or unverifiable but write did not throw)
+      } catch (e) {
+        lastErr = e;
       }
-    } catch (_) {}
-    try {
-      await fs(folderUrl).createFile(fileName, b64, { encoding: 'base64', overwrite: true });
-      return;
-    } catch (_) {}
-    try {
-      await createFile(folderUrl, fileName, arrayBuffer, { overwrite: true });
-    } catch (e) {
-      throw e;
     }
+    throw lastErr || new Error('Failed to write PNG: ' + fileName);
   }
 
   async processAndSaveIcons(onProgress) {
@@ -875,13 +973,16 @@ export class IconGenerationUI {
         tick(`App icon ${density.name}`);
       }
 
-      onProgress(88, 'Linking manifest to @mipmap…');
+      onProgress(88, 'Auto-linking layouts + manifest → @mipmap…');
       try {
         const more = await this.ensureManifestUsesMipmapIcons(mainRes.url, resRes.url);
         if (more && more.removed) removed.push(...more.removed);
         if (more && more.manifestUpdated) removed.push('manifest→@mipmap');
+        if (more && more.rewritten && more.rewritten.length) {
+          removed.push('refs:' + more.rewritten.slice(0, 4).join(','));
+        }
       } catch (e) {
-        console.warn('Manifest icon link', e);
+        console.warn('Manifest/layout icon link', e);
       }
     }
 
@@ -971,44 +1072,59 @@ export class IconGenerationUI {
   }
 
   async ensureManifestUsesMipmapIcons(mainUrl, resUrl) {
-    const fsApi = acode.require('fs');
+    const fsApi = acode.require('fs') || acode.require('fsOperation');
     const candidates = [`${mainUrl}/AndroidManifest.xml`];
     try {
       candidates.push(`${this.projectRoot}/src/main/AndroidManifest.xml`);
+      // also common when projectRoot is repo root
+      candidates.push(`${this.projectRoot}/app/src/main/AndroidManifest.xml`);
     } catch (_) {}
 
     let updated = false;
     const removed = [];
+    const rewritten = [];
+
+    const rewriteLauncherRefs = (content) => {
+      let c = String(content);
+      const before = c;
+      // @drawable/ic_launcher_round → @mipmap/ic_launcher_round
+      c = c.replace(/@drawable\/ic_launcher_round\b/g, '@mipmap/ic_launcher_round');
+      // @drawable/ic_launcher (not _background/_foreground)
+      c = c.replace(/@drawable\/ic_launcher\b(?!_)/g, '@mipmap/ic_launcher');
+      // attribute forms that still point at drawable launcher
+      c = c.replace(
+        /android:icon\s*=\s*["']@drawable\/ic_launcher["']/g,
+        'android:icon="@mipmap/ic_launcher"'
+      );
+      c = c.replace(
+        /android:roundIcon\s*=\s*["']@drawable\/ic_launcher_round["']/g,
+        'android:roundIcon="@mipmap/ic_launcher_round"'
+      );
+      return { content: c, changed: c !== before };
+    };
+
+    // 1) Manifest
     for (const manifestPath of candidates) {
       try {
         if (!(await fsApi(manifestPath).exists())) continue;
         let content = String(await fsApi(manifestPath).readFile('utf-8'));
-        const before = content;
-        content = content.replace(
-          /android:icon\s*=\s*["']@drawable\/ic_launcher["']/g,
-          'android:icon="@mipmap/ic_launcher"'
-        );
-        content = content.replace(
-          /android:roundIcon\s*=\s*["']@drawable\/ic_launcher_round["']/g,
-          'android:roundIcon="@mipmap/ic_launcher_round"'
-        );
-        if (
-          content === before &&
-          /android:icon\s*=/.test(content) &&
-          !/android:icon\s*=\s*["']@mipmap\/ic_launcher["']/.test(content)
-        ) {
-          content = content.replace(
+        let { content: next, changed } = rewriteLauncherRefs(content);
+        // force mipmap if still not pointing there
+        if (!/@mipmap\/ic_launcher\b/.test(next) && /android:icon\s*=/.test(next)) {
+          next = next.replace(
             /android:icon\s*=\s*["'][^"']+["']/,
             'android:icon="@mipmap/ic_launcher"'
           );
-          content = content.replace(
+          next = next.replace(
             /android:roundIcon\s*=\s*["'][^"']+["']/,
             'android:roundIcon="@mipmap/ic_launcher_round"'
           );
+          changed = true;
         }
-        if (content !== before) {
-          await fsApi(manifestPath).writeFile(content);
+        if (changed) {
+          await fsApi(manifestPath).writeFile(next);
           updated = true;
+          rewritten.push('AndroidManifest.xml');
         }
         break;
       } catch (e) {
@@ -1016,13 +1132,71 @@ export class IconGenerationUI {
       }
     }
 
+    // 2) All layout / menu / values / xml under res — auto-fix @drawable/ic_launcher*
+    const scanDirs = ['layout', 'menu', 'xml', 'drawable', 'values', 'values-night'];
+    const walkAndRewrite = async (dirUrl, label) => {
+      try {
+        if (!(await fsApi(dirUrl).exists())) return;
+        const entries = await fsApi(dirUrl).lsDir();
+        for (const item of entries || []) {
+          const name = item.name || '';
+          if (item.isDirectory) {
+            await walkAndRewrite(item.url, label + '/' + name);
+            continue;
+          }
+          if (!/\.xml$/i.test(name)) continue;
+          // skip vector drawables that are NOT launcher aliases
+          if (/^ic_menu_/i.test(name) || /^ic_splash/i.test(name) || /^ic_notification/i.test(name)) {
+            continue;
+          }
+          try {
+            const raw = String(await fsApi(item.url).readFile('utf-8'));
+            const { content: next, changed } = rewriteLauncherRefs(raw);
+            if (changed) {
+              await fsApi(item.url).writeFile(next);
+              rewritten.push((label ? label + '/' : '') + name);
+            }
+          } catch (e) {
+            console.warn('rewrite xml', item.url, e);
+          }
+        }
+      } catch (_) {}
+    };
+
+    for (const d of scanDirs) {
+      await walkAndRewrite(`${resUrl}/${d}`, d);
+    }
+    // also scan res root for stray xml
+    try {
+      const resEntries = await fsApi(resUrl).lsDir();
+      for (const item of resEntries || []) {
+        if (item.isFile && /\.xml$/i.test(item.name || '')) {
+          try {
+            const raw = String(await fsApi(item.url).readFile('utf-8'));
+            const { content: next, changed } = rewriteLauncherRefs(raw);
+            if (changed) {
+              await fsApi(item.url).writeFile(next);
+              rewritten.push(item.name);
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // 3) Remove conflicting adaptive / drawable launcher XML so only mipmap PNG wins
     try {
       const drawableUrl = `${resUrl}/drawable`;
       if (await fsApi(drawableUrl).exists()) {
-        for (const name of ['ic_launcher.xml', 'ic_launcher_round.xml']) {
+        for (const name of [
+          'ic_launcher.xml',
+          'ic_launcher_round.xml',
+          'ic_launcher_background.xml',
+          'ic_launcher_foreground.xml',
+        ]) {
           const u = `${drawableUrl}/${name}`;
           try {
             if (await fsApi(u).exists()) {
+              // keep background/foreground only if still referenced by remaining adaptive — we deleted anydpi
               await fsApi(u).delete();
               removed.push('drawable/' + name);
             }
@@ -1031,6 +1205,63 @@ export class IconGenerationUI {
       }
     } catch (_) {}
 
-    return { removed, manifestUpdated: updated };
+    // 4) Safety: if something still expects @drawable/ic_launcher_round, drop a thin alias
+    // that points at mipmap (works when a 3rd-party snippet hardcodes drawable)
+    try {
+      const drawableUrl = `${resUrl}/drawable`;
+      await this._ensureDrawableAlias(drawableUrl, 'ic_launcher_round', '@mipmap/ic_launcher_round');
+      await this._ensureDrawableAlias(drawableUrl, 'ic_launcher', '@mipmap/ic_launcher');
+    } catch (e) {
+      console.warn('drawable alias', e);
+    }
+
+    if (rewritten.length) {
+      console.log('[icon] auto-rewrote refs in:', rewritten.join(', '));
+    }
+
+    return { removed, manifestUpdated: updated, rewritten };
+  }
+
+  /**
+   * Create drawable/NAME.xml as <bitmap> or <item> alias → @mipmap/...
+   * so any leftover @drawable/NAME still resolves after Icon Studio.
+   */
+  async _ensureDrawableAlias(drawableUrl, name, mipmapRef) {
+    const fsApi = acode.require('fs') || acode.require('fsOperation');
+    if (!drawableUrl) return;
+    try {
+      // ensure folder
+      try {
+        if (!(await fsApi(drawableUrl).exists())) {
+          const parent = drawableUrl.replace(/\/[^/]+\/?$/, '');
+          const folder = drawableUrl.split('/').pop();
+          await fsApi(parent).createDirectory(folder);
+        }
+      } catch (_) {}
+
+      const file = `${drawableUrl}/${name}.xml`;
+      // only create if missing (we may have just deleted adaptive versions)
+      let exists = false;
+      try {
+        exists = await fsApi(file).exists();
+      } catch (_) {}
+      if (exists) return;
+
+      const xml =
+        `<?xml version="1.0" encoding="utf-8"?>\n` +
+        `<bitmap xmlns:android="http://schemas.android.com/apk/res/android"\n` +
+        `    android:src="${mipmapRef}" />\n`;
+      try {
+        await fsApi(drawableUrl).createFile(`${name}.xml`, xml);
+      } catch (_) {
+        try {
+          await fsApi(file).writeFile(xml);
+        } catch (e2) {
+          console.warn('alias write', name, e2);
+        }
+      }
+    } catch (e) {
+      console.warn('_ensureDrawableAlias', name, e);
+    }
   }
 }
