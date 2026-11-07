@@ -400,7 +400,18 @@ export class IconGenerationUI {
           window.toast('Icons updated successfully!', 3000);
         }
         try { notifyIconUpdated(this.projectRoot); } catch (_) {}
-        this.editorFile.remove();
+        // Keep Icon Studio open so user can tweak / re-export without reopening
+        genBtn.innerText = 'Set Icon';
+        genBtn.disabled = false;
+        genBtn.classList.remove('btn-disabled-processing');
+        // leave progress visible briefly then soft-reset
+        setTimeout(() => {
+          try {
+            progressWrapper.style.display = 'none';
+            progressBar.style.width = '0%';
+            statusText.innerText = 'Ready — change options and Set Icon again anytime';
+          } catch (_) {}
+        }, 1800);
       } catch (err) {
         console.error('Icon Gen Error:', err);
         window.alert('Error: ' + (err.message || err));
@@ -756,41 +767,128 @@ export class IconGenerationUI {
 
 
 
-  async _pngWrite(folderUrl, fileName, arrayBuffer) {
+  async async _pngWrite(folderUrl, fileName, arrayBuffer) {
     const fs = acode.require('fs') || acode.require('fsOperation');
     const u8 = arrayBuffer instanceof Uint8Array
       ? arrayBuffer
       : new Uint8Array(arrayBuffer);
+    if (!u8 || !u8.byteLength) throw new Error('empty PNG buffer: ' + fileName);
+
+    // PNG magic: 89 50 4E 47
+    if (!(u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47)) {
+      console.warn('[icon] buffer missing PNG magic for', fileName, u8[0], u8[1]);
+    }
+
+    const dirUrl = String(folderUrl).replace(/\/+$/, '');
+    const full = dirUrl + '/' + fileName;
+
     let binary = '';
     const step = 0x8000;
     for (let i = 0; i < u8.length; i += step) {
       binary += String.fromCharCode.apply(null, u8.subarray(i, i + step));
     }
     const b64 = btoa(binary);
-    // Prefer base64 encoding so later reads stay valid
-    try {
-      const full = String(folderUrl).replace(/\/+$/, '') + '/' + fileName;
-      if (await fs(full).exists()) {
+
+    const verifyPng = async () => {
+      try {
+        // Prefer base64 read — if FS stored raw bytes correctly this returns iVBOR…
+        let raw = null;
         try {
-          await fs(full).writeFile(b64, 'base64');
-          return;
-        } catch (_) {
+          raw = await fs(full).readFile('base64');
+        } catch (_) {}
+        if (typeof raw === 'string') {
+          const t = raw.replace(/\s/g, '');
+          // Valid PNG base64 starts with iVBOR
+          if (t.startsWith('iVBOR')) return true;
+          // Corrupted UTF-8 read of PNG often starts with /VBORw
+          if (t.startsWith('/VBORw') || t.startsWith('iVBORw0KGgo') === false && t.length < 32) {
+            return false;
+          }
+          // If we got long base64 that decodes to PNG magic, accept
           try {
-            await fs(full).writeFile(b64, { encoding: 'base64' });
-            return;
-          } catch (__) {}
+            const bin = atob(t.slice(0, 16));
+            if (bin.charCodeAt(0) === 0x89 && bin.charCodeAt(1) === 0x50) return true;
+          } catch (_) {}
+          return t.startsWith('iVBOR');
         }
+        // ArrayBuffer path
+        try {
+          const ab = await fs(full).readFile();
+          const b = ab instanceof ArrayBuffer ? new Uint8Array(ab)
+            : ArrayBuffer.isView(ab) ? new Uint8Array(ab.buffer, ab.byteOffset, ab.byteLength)
+            : null;
+          if (b && b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+            return true;
+          }
+        } catch (_) {}
+      } catch (_) {}
+      return null; // unknown — don't fail hard
+    };
+
+    const attempts = [
+      // 1) Raw Uint8Array / ArrayBuffer (best for content:// binary)
+      async () => {
+        const exists = await fs(full).exists().catch(() => false);
+        if (exists) {
+          await fs(full).writeFile(u8);
+        } else {
+          await fs(dirUrl).createFile(fileName, u8);
+        }
+      },
+      async () => {
+        const exists = await fs(full).exists().catch(() => false);
+        const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+        if (exists) await fs(full).writeFile(ab);
+        else await fs(dirUrl).createFile(fileName, ab);
+      },
+      // 2) Blob
+      async () => {
+        const blob = new Blob([u8], { type: 'image/png' });
+        const exists = await fs(full).exists().catch(() => false);
+        if (exists) await fs(full).writeFile(blob);
+        else await fs(dirUrl).createFile(fileName, blob);
+      },
+      // 3) base64 WITH encoding flag only (never plain base64 string as utf-8)
+      async () => {
+        const exists = await fs(full).exists().catch(() => false);
+        if (exists) {
+          try {
+            await fs(full).writeFile(b64, 'base64');
+            return;
+          } catch (_) {
+            await fs(full).writeFile(b64, { encoding: 'base64' });
+          }
+        } else {
+          try {
+            await fs(dirUrl).createFile(fileName, b64, { encoding: 'base64' });
+          } catch (_) {
+            await fs(dirUrl).createFile(fileName, b64, 'base64');
+          }
+        }
+      },
+      // 4) fileOperations helper with ArrayBuffer
+      async () => {
+        await createFile(dirUrl, fileName, u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength), {
+          overwrite: true,
+        });
+      },
+    ];
+
+    let lastErr = null;
+    for (const fn of attempts) {
+      try {
+        await fn();
+        const ok = await verifyPng();
+        if (ok === false) {
+          lastErr = new Error('PNG magic verify failed after write: ' + fileName);
+          continue; // try next strategy
+        }
+        return; // success (or unverifiable but write did not throw)
+      } catch (e) {
+        lastErr = e;
       }
-    } catch (_) {}
-    try {
-      await fs(folderUrl).createFile(fileName, b64, { encoding: 'base64', overwrite: true });
-      return;
-    } catch (_) {}
-    try {
-      await createFile(folderUrl, fileName, arrayBuffer, { overwrite: true });
-    } catch (e) {
-      throw e;
     }
+    throw lastErr || new Error('Failed to write PNG: ' + fileName);
   }
 
   async processAndSaveIcons(onProgress) {
