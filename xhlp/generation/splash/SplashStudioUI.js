@@ -1,6 +1,6 @@
 import { pageStyles } from '../../styles/styles.js';
 import { assets } from '../../assets/assets.js';
-import { createFolder, createFile } from '../../operations/fileOperations.js';
+import { createFolder, createFile, writeBinaryFile } from '../../operations/fileOperations.js';
 import { findLauncherIconUrl } from '../icon/loadProjectIcon.js';
 
 /**
@@ -496,10 +496,19 @@ export class SplashStudioUI {
         for (const d of dens) {
           const folder = await createFolder(res.url, d.name, folderOpts);
           const buf = await this._logoPngBuffer(d.size);
-          await createFile(folder.url, 'ic_splash_logo.png', buf, fileOpts);
+          const wr = await writeBinaryFile(folder.url, 'ic_splash_logo.png', buf, { overwrite: true });
+          if (!wr.success) throw new Error(wr.message || 'splash logo write failed');
         }
         const dr = await createFolder(res.url, 'drawable', folderOpts);
-        await createFile(dr.url, 'ic_splash_logo.png', await this._logoPngBuffer(192), fileOpts);
+        {
+          const wr = await writeBinaryFile(
+            dr.url,
+            'ic_splash_logo.png',
+            await this._logoPngBuffer(192),
+            { overwrite: true }
+          );
+          if (!wr.success) throw new Error(wr.message || 'splash logo write failed');
+        }
       } else {
         warnings.push('No logo set — theme uses @mipmap/ic_launcher if present.');
       }

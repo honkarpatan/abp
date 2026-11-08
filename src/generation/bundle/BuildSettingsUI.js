@@ -6,7 +6,6 @@ import { buildManager } from './buildManager.js';
 import { keystoreManager } from './keystoreManager.js';
 import { IconGenerationUI } from '../icon/IconGenerationUI.js';
 import { SplashStudioUI } from '../splash/SplashStudioUI.js';
-import { SvgStudioUI } from '../svg/SvgStudioUI.js';
 import { findLauncherIconUrl } from '../icon/loadProjectIcon.js';
 import { FeatureStoreUI } from '../../features/FeatureStoreUI.js';
 import { getSettings } from '../../services/settings.js';
@@ -272,13 +271,6 @@ export class BuildSettingsUI {
              </div>
              <button class="btn-prop" id="btn-tool-splash">Add Splash</button>
          </div>
-         <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #333;">
-             <div>
-                 <div style="font-weight:bold;">SVG Studio</div>
-                 <div style="font-size:0.75rem; opacity:0.7;">Edit colors · popup editor · SVG → Vector</div>
-             </div>
-             <button class="btn-prop" id="btn-tool-svg">Open SVG</button>
-         </div>
          <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0;">
              <div>
                  <div style="font-weight:bold;">Feature Store</div>
@@ -440,9 +432,6 @@ export class BuildSettingsUI {
         new SplashStudioUI().show(rawPath);
     };
 
-    $container.querySelector('#btn-tool-svg').onclick = () => {
-        new SvgStudioUI().show(rawPath);
-    };
 
     $container.querySelector('#btn-tool-store').onclick = () => {
         new FeatureStoreUI(this.projectPath).show();

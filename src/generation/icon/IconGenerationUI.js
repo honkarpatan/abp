@@ -16,6 +16,9 @@ export class IconGenerationUI {
     this.projectRoot = '';
     this.selectedFile = null;
     this._sourceImg = null;
+    /** Full SVG markup when source is from Icon Store (enables SVG Studio) */
+    this._selectedSvgText = null;
+    this._selectedSvgMeta = null;
     this._opts = {
       scale: 100,
       padding: 10,
@@ -127,7 +130,7 @@ export class IconGenerationUI {
           <div class="icon-source-actions">
             <button type="button" class="icon-src-btn" id="btn-pick-img">${imageIcon || ''} Local file</button>
             <button type="button" class="icon-src-btn icon-src-store" id="btn-icon-store">Icon Store</button>
-            <button type="button" class="icon-src-btn" id="btn-svg-studio">SVG Studio</button>
+            <button type="button" class="icon-src-btn" id="btn-svg-studio" style="display:none;">SVG Studio</button>
           </div>
           <div class="input-row" style="margin-top:8px;">
             <input type="text" id="img-path" class="andro-input input-path-field" placeholder="No image selected" readonly>
@@ -293,7 +296,7 @@ export class IconGenerationUI {
       if (open) this._searchIconStore($container, 'android');
     };
     $container.querySelector('#btn-svg-studio').onclick = () => {
-      new SvgStudioUI().show(this.projectRoot || '');
+      this._openSvgStudio($container);
     };
     $container.querySelector('#store-go').onclick = () => {
       const q = $container.querySelector('#store-q')?.value?.trim() || 'app';
@@ -310,6 +313,9 @@ export class IconGenerationUI {
       const file = e.target.files[0];
       if (!file) return;
       this.selectedFile = file;
+      this._selectedSvgText = null;
+      this._selectedSvgMeta = null;
+      this._setSvgStudioVisible(false);
       pathInput.value = file.name;
       sizeTag.innerText = this.formatBytes(file.size);
       const url = URL.createObjectURL(file);
@@ -557,6 +563,85 @@ export class IconGenerationUI {
     container.style.display = 'block';
   }
 
+
+  _setSvgStudioVisible(show) {
+    const btn = this._$?.querySelector('#btn-svg-studio');
+    if (btn) btn.style.display = show ? '' : 'none';
+  }
+
+  _buildSvgMarkup(body, w, h) {
+    const width = w || 24;
+    const height = h || 24;
+    if (String(body || '').trim().startsWith('<svg')) return String(body);
+    return (
+      `<?xml version="1.0" encoding="utf-8"?>` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+      `${body}</svg>`
+    );
+  }
+
+  _openSvgStudio($container) {
+    if (!this._selectedSvgText) {
+      window.toast('Select an SVG from Icon Store first', 2500);
+      return;
+    }
+    const studio = new SvgStudioUI();
+    studio.show(this.projectRoot || '', this._selectedSvgText, {
+      onContinue: async (editedSvg) => {
+        try {
+          await this._applySvgToIconStudio($container, editedSvg);
+          window.toast('SVG applied to Icon Studio', 2500);
+        } catch (e) {
+          console.error(e);
+          window.toast('Failed to apply SVG: ' + (e.message || e), 3500);
+        }
+      },
+    });
+  }
+
+  async _applySvgToIconStudio($container, svgText) {
+    this._selectedSvgText = String(svgText || '');
+    const encoded =
+      'data:image/svg+xml;charset=utf-8,' +
+      encodeURIComponent(this._selectedSvgText);
+    const img = await this._loadImg(encoded);
+    const c = document.createElement('canvas');
+    c.width = 512;
+    c.height = 512;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, 512, 512);
+    const scale = Math.min(512 / (img.width || 24), 512 / (img.height || 24)) * 0.72;
+    const dw = (img.width || 24) * scale;
+    const dh = (img.height || 24) * scale;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, (512 - dw) / 2, (512 - dh) / 2, dw, dh);
+    const dataUrl = c.toDataURL('image/png');
+    const out = await this._loadImg(dataUrl);
+    this._sourceImg = out;
+    this.selectedFile = {
+      name: (this._selectedSvgMeta?.name || 'icon') + '.png',
+      size: 0,
+      _fromStore: this._selectedSvgMeta?.id || 'svg-studio',
+      _fromSvgStudio: true,
+    };
+    this._setSvgStudioVisible(true);
+    const pathInput = $container?.querySelector('#img-path');
+    const metaInfo = $container?.querySelector('#meta-info');
+    const dimTag = $container?.querySelector('#meta-dim');
+    const sizeTag = $container?.querySelector('#meta-size');
+    const srcTag = $container?.querySelector('#meta-src');
+    if (pathInput) pathInput.value = 'SVG Studio: ' + (this._selectedSvgMeta?.name || 'edited');
+    if (dimTag) dimTag.innerText = `${out.width}×${out.height}`;
+    if (sizeTag) sizeTag.innerText = 'svg';
+    if (srcTag) {
+      srcTag.style.display = 'inline';
+      srcTag.innerText = 'svg-studio';
+    }
+    if (metaInfo) metaInfo.style.display = 'block';
+    this._paintPreviews();
+  }
+
   resolveProjectRoot(path) {
     const parts = String(path || '').split('/');
     const srcIndex = parts.indexOf('src');
@@ -746,6 +831,11 @@ export class IconGenerationUI {
 
       this._sourceImg = out;
       this.selectedFile = { name: `${item.name || 'icon'}.png`, size: 0, _fromStore: id };
+      // Keep original SVG so user can open SVG Studio
+      this._selectedSvgText = this._buildSvgMarkup(body, w, h);
+      this._selectedSvgMeta = { id, name: item.name, w, h, body };
+      this._setSvgStudioVisible(true);
+
       this._opts.bgTransparent = false;
       const pathInput = $container.querySelector('#img-path');
       const metaInfo = $container.querySelector('#meta-info');

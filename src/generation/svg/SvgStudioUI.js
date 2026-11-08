@@ -26,6 +26,8 @@ export class SvgStudioUI {
     this.projectRoot = '';
     this.svgText = SAMPLE;
     this._$ = null;
+    /** @type {null|((svgText: string) => void)} */
+    this._onContinue = null;
   }
 
   resolveProjectRoot(filePath) {
@@ -46,8 +48,14 @@ export class SvgStudioUI {
     }
   }
 
-  async show(currentFilePath, initialSvg) {
+  /**
+   * @param {string} currentFilePath
+   * @param {string} [initialSvg]
+   * @param {{ onContinue?: (svgText: string) => void }} [opts]
+   */
+  async show(currentFilePath, initialSvg, opts) {
     this.projectRoot = this.resolveProjectRoot(currentFilePath);
+    this._onContinue = (opts && typeof opts.onContinue === 'function') ? opts.onContinue : null;
     if (initialSvg) this.svgText = String(initialSvg);
 
     const EditorFile = acode.require('editorFile');
@@ -92,7 +100,8 @@ export class SvgStudioUI {
 
         <div class="svg-footer">
           <button type="button" class="andro-btn secondary" id="svg-btn-close">Close</button>
-          <button type="button" class="andro-btn primary" id="svg-btn-save-vd">Save vector drawable</button>
+          <button type="button" class="andro-btn secondary" id="svg-btn-save-vd">Save vector drawable</button>
+          <button type="button" class="andro-btn primary" id="svg-btn-continue" style="display:none;">Continue</button>
         </div>
         <div class="svg-status" id="svg-status"></div>
       </div>
@@ -118,6 +127,23 @@ export class SvgStudioUI {
     $c.querySelector('#svg-btn-editor').onclick = () => this._openEditor();
     $c.querySelector('#svg-btn-vector').onclick = () => this._showVectorPreview();
     $c.querySelector('#svg-btn-save-vd').onclick = () => this._saveVector();
+
+    const cont = $c.querySelector('#svg-btn-continue');
+    if (cont) {
+      if (this._onContinue) {
+        cont.style.display = '';
+        cont.onclick = () => {
+          try {
+            this._onContinue(this.svgText);
+          } catch (e) {
+            console.error('svg continue', e);
+          }
+          this.editorFile?.remove();
+        };
+      } else {
+        cont.style.display = 'none';
+      }
+    }
   }
 
   _setStatus(msg, isErr) {

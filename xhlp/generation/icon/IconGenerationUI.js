@@ -1,8 +1,9 @@
 import { svgs } from '../../assets/icons/svg/svg.js';
 import { pageStyles } from '../../styles/styles.js';
 import { assets } from '../../assets/assets.js';
-import { createFolder, createFile } from '../../operations/fileOperations.js';
+import { createFolder, createFile, writeBinaryFile } from '../../operations/fileOperations.js';
 import { findLauncherIconUrl, notifyIconUpdated } from './loadProjectIcon.js';
+import { SvgStudioUI } from '../svg/SvgStudioUI.js';
 
 /**
  * Ultimate Android launcher icon studio:
@@ -15,6 +16,9 @@ export class IconGenerationUI {
     this.projectRoot = '';
     this.selectedFile = null;
     this._sourceImg = null;
+    /** Full SVG markup when source is from Icon Store (enables SVG Studio) */
+    this._selectedSvgText = null;
+    this._selectedSvgMeta = null;
     this._opts = {
       scale: 100,
       padding: 10,
@@ -126,6 +130,7 @@ export class IconGenerationUI {
           <div class="icon-source-actions">
             <button type="button" class="icon-src-btn" id="btn-pick-img">${imageIcon || ''} Local file</button>
             <button type="button" class="icon-src-btn icon-src-store" id="btn-icon-store">Icon Store</button>
+            <button type="button" class="icon-src-btn" id="btn-svg-studio" style="display:none;">SVG Studio</button>
           </div>
           <div class="input-row" style="margin-top:8px;">
             <input type="text" id="img-path" class="andro-input input-path-field" placeholder="No image selected" readonly>
@@ -290,6 +295,9 @@ export class IconGenerationUI {
       storePanel.style.display = open ? 'block' : 'none';
       if (open) this._searchIconStore($container, 'android');
     };
+    $container.querySelector('#btn-svg-studio').onclick = () => {
+      this._openSvgStudio($container);
+    };
     $container.querySelector('#store-go').onclick = () => {
       const q = $container.querySelector('#store-q')?.value?.trim() || 'app';
       this._searchIconStore($container, q);
@@ -305,6 +313,9 @@ export class IconGenerationUI {
       const file = e.target.files[0];
       if (!file) return;
       this.selectedFile = file;
+      this._selectedSvgText = null;
+      this._selectedSvgMeta = null;
+      this._setSvgStudioVisible(false);
       pathInput.value = file.name;
       sizeTag.innerText = this.formatBytes(file.size);
       const url = URL.createObjectURL(file);
@@ -552,6 +563,85 @@ export class IconGenerationUI {
     container.style.display = 'block';
   }
 
+
+  _setSvgStudioVisible(show) {
+    const btn = this._$?.querySelector('#btn-svg-studio');
+    if (btn) btn.style.display = show ? '' : 'none';
+  }
+
+  _buildSvgMarkup(body, w, h) {
+    const width = w || 24;
+    const height = h || 24;
+    if (String(body || '').trim().startsWith('<svg')) return String(body);
+    return (
+      `<?xml version="1.0" encoding="utf-8"?>` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+      `${body}</svg>`
+    );
+  }
+
+  _openSvgStudio($container) {
+    if (!this._selectedSvgText) {
+      window.toast('Select an SVG from Icon Store first', 2500);
+      return;
+    }
+    const studio = new SvgStudioUI();
+    studio.show(this.projectRoot || '', this._selectedSvgText, {
+      onContinue: async (editedSvg) => {
+        try {
+          await this._applySvgToIconStudio($container, editedSvg);
+          window.toast('SVG applied to Icon Studio', 2500);
+        } catch (e) {
+          console.error(e);
+          window.toast('Failed to apply SVG: ' + (e.message || e), 3500);
+        }
+      },
+    });
+  }
+
+  async _applySvgToIconStudio($container, svgText) {
+    this._selectedSvgText = String(svgText || '');
+    const encoded =
+      'data:image/svg+xml;charset=utf-8,' +
+      encodeURIComponent(this._selectedSvgText);
+    const img = await this._loadImg(encoded);
+    const c = document.createElement('canvas');
+    c.width = 512;
+    c.height = 512;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, 512, 512);
+    const scale = Math.min(512 / (img.width || 24), 512 / (img.height || 24)) * 0.72;
+    const dw = (img.width || 24) * scale;
+    const dh = (img.height || 24) * scale;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, (512 - dw) / 2, (512 - dh) / 2, dw, dh);
+    const dataUrl = c.toDataURL('image/png');
+    const out = await this._loadImg(dataUrl);
+    this._sourceImg = out;
+    this.selectedFile = {
+      name: (this._selectedSvgMeta?.name || 'icon') + '.png',
+      size: 0,
+      _fromStore: this._selectedSvgMeta?.id || 'svg-studio',
+      _fromSvgStudio: true,
+    };
+    this._setSvgStudioVisible(true);
+    const pathInput = $container?.querySelector('#img-path');
+    const metaInfo = $container?.querySelector('#meta-info');
+    const dimTag = $container?.querySelector('#meta-dim');
+    const sizeTag = $container?.querySelector('#meta-size');
+    const srcTag = $container?.querySelector('#meta-src');
+    if (pathInput) pathInput.value = 'SVG Studio: ' + (this._selectedSvgMeta?.name || 'edited');
+    if (dimTag) dimTag.innerText = `${out.width}×${out.height}`;
+    if (sizeTag) sizeTag.innerText = 'svg';
+    if (srcTag) {
+      srcTag.style.display = 'inline';
+      srcTag.innerText = 'svg-studio';
+    }
+    if (metaInfo) metaInfo.style.display = 'block';
+    this._paintPreviews();
+  }
+
   resolveProjectRoot(path) {
     const parts = String(path || '').split('/');
     const srcIndex = parts.indexOf('src');
@@ -741,6 +831,11 @@ export class IconGenerationUI {
 
       this._sourceImg = out;
       this.selectedFile = { name: `${item.name || 'icon'}.png`, size: 0, _fromStore: id };
+      // Keep original SVG so user can open SVG Studio
+      this._selectedSvgText = this._buildSvgMarkup(body, w, h);
+      this._selectedSvgMeta = { id, name: item.name, w, h, body };
+      this._setSvgStudioVisible(true);
+
       this._opts.bgTransparent = false;
       const pathInput = $container.querySelector('#img-path');
       const metaInfo = $container.querySelector('#meta-info');
@@ -768,127 +863,24 @@ export class IconGenerationUI {
 
 
   async _pngWrite(folderUrl, fileName, arrayBuffer) {
-    const fs = acode.require('fs') || acode.require('fsOperation');
-    const u8 = arrayBuffer instanceof Uint8Array
-      ? arrayBuffer
-      : new Uint8Array(arrayBuffer);
+    const u8 =
+      arrayBuffer instanceof Uint8Array
+        ? arrayBuffer
+        : new Uint8Array(arrayBuffer);
     if (!u8 || !u8.byteLength) throw new Error('empty PNG buffer: ' + fileName);
 
-    // PNG magic: 89 50 4E 47
+    // Must be real PNG bytes from canvas — never write without magic
     if (!(u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47)) {
-      console.warn('[icon] buffer missing PNG magic for', fileName, u8[0], u8[1]);
+      console.warn('[icon] buffer missing PNG magic for', fileName, u8[0], u8[1], u8[2], u8[3]);
+      throw new Error('Invalid PNG buffer (bad magic): ' + fileName);
     }
 
-    const dirUrl = String(folderUrl).replace(/\/+$/, '');
-    const full = dirUrl + '/' + fileName;
-
-    let binary = '';
-    const step = 0x8000;
-    for (let i = 0; i < u8.length; i += step) {
-      binary += String.fromCharCode.apply(null, u8.subarray(i, i + step));
+    // Acode FS corrupts binary if written as UTF-8 — always base64 + verify
+    const res = await writeBinaryFile(folderUrl, fileName, u8, { overwrite: true });
+    if (!res || !res.success) {
+      throw new Error((res && res.message) || 'Failed to write PNG: ' + fileName);
     }
-    const b64 = btoa(binary);
-
-    const verifyPng = async () => {
-      try {
-        // Prefer base64 read — if FS stored raw bytes correctly this returns iVBOR…
-        let raw = null;
-        try {
-          raw = await fs(full).readFile('base64');
-        } catch (_) {}
-        if (typeof raw === 'string') {
-          const t = raw.replace(/\s/g, '');
-          // Valid PNG base64 starts with iVBOR
-          if (t.startsWith('iVBOR')) return true;
-          // Corrupted UTF-8 read of PNG often starts with /VBORw
-          if (t.startsWith('/VBORw') || t.startsWith('iVBORw0KGgo') === false && t.length < 32) {
-            return false;
-          }
-          // If we got long base64 that decodes to PNG magic, accept
-          try {
-            const bin = atob(t.slice(0, 16));
-            if (bin.charCodeAt(0) === 0x89 && bin.charCodeAt(1) === 0x50) return true;
-          } catch (_) {}
-          return t.startsWith('iVBOR');
-        }
-        // ArrayBuffer path
-        try {
-          const ab = await fs(full).readFile();
-          const b = ab instanceof ArrayBuffer ? new Uint8Array(ab)
-            : ArrayBuffer.isView(ab) ? new Uint8Array(ab.buffer, ab.byteOffset, ab.byteLength)
-            : null;
-          if (b && b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
-            return true;
-          }
-        } catch (_) {}
-      } catch (_) {}
-      return null; // unknown — don't fail hard
-    };
-
-    const attempts = [
-      // 1) Raw Uint8Array / ArrayBuffer (best for content:// binary)
-      async () => {
-        const exists = await fs(full).exists().catch(() => false);
-        if (exists) {
-          await fs(full).writeFile(u8);
-        } else {
-          await fs(dirUrl).createFile(fileName, u8);
-        }
-      },
-      async () => {
-        const exists = await fs(full).exists().catch(() => false);
-        const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-        if (exists) await fs(full).writeFile(ab);
-        else await fs(dirUrl).createFile(fileName, ab);
-      },
-      // 2) Blob
-      async () => {
-        const blob = new Blob([u8], { type: 'image/png' });
-        const exists = await fs(full).exists().catch(() => false);
-        if (exists) await fs(full).writeFile(blob);
-        else await fs(dirUrl).createFile(fileName, blob);
-      },
-      // 3) base64 WITH encoding flag only (never plain base64 string as utf-8)
-      async () => {
-        const exists = await fs(full).exists().catch(() => false);
-        if (exists) {
-          try {
-            await fs(full).writeFile(b64, 'base64');
-            return;
-          } catch (_) {
-            await fs(full).writeFile(b64, { encoding: 'base64' });
-          }
-        } else {
-          try {
-            await fs(dirUrl).createFile(fileName, b64, { encoding: 'base64' });
-          } catch (_) {
-            await fs(dirUrl).createFile(fileName, b64, 'base64');
-          }
-        }
-      },
-      // 4) fileOperations helper with ArrayBuffer
-      async () => {
-        await createFile(dirUrl, fileName, u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength), {
-          overwrite: true,
-        });
-      },
-    ];
-
-    let lastErr = null;
-    for (const fn of attempts) {
-      try {
-        await fn();
-        const ok = await verifyPng();
-        if (ok === false) {
-          lastErr = new Error('PNG magic verify failed after write: ' + fileName);
-          continue; // try next strategy
-        }
-        return; // success (or unverifiable but write did not throw)
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr || new Error('Failed to write PNG: ' + fileName);
+    console.log('[icon] wrote OK', fileName, res.url);
   }
 
   async processAndSaveIcons(onProgress) {

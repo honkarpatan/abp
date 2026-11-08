@@ -432,6 +432,7 @@ export class BuildSettingsUI {
         new SplashStudioUI().show(rawPath);
     };
 
+
     $container.querySelector('#btn-tool-store').onclick = () => {
         new FeatureStoreUI(this.projectPath).show();
     };
