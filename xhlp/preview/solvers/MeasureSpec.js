@@ -1,2 +1,0 @@
-// Android's onMeasure simulation
-│   │
