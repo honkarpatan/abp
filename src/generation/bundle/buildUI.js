@@ -324,7 +324,7 @@ export class BuildUI {
         
         if (payload && typeof payload.onDownload === 'function') {
           actionBtn.style.display = "inline-block";
-          actionBtn.innerText = "Save to Downloads";
+          actionBtn.innerText = "Save to Download";
           actionBtn.style.backgroundColor = "#4CAF50";
           actionBtn.onclick = payload.onDownload;
         } else {

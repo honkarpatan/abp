@@ -53,7 +53,7 @@ export function renderConfigureScreen($container, template, onPrevious, onCancel
           </button>
         </div>
         <p style="opacity:0.65;font-size:0.8rem;margin-top:6px;">
-          Choose an existing folder (Download / Documents). Alpine paths are not used.
+          Choose an folder from Acode Terminal eg : file:///data/user/0/com.foxdebug.acodefree/files/public/Android_project.
         </p>
       </div>
 

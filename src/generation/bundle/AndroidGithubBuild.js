@@ -597,7 +597,7 @@ export class AndroidGithubBuildManager {
       }
 
       this._log('Downloading artifact…\n');
-      await this._downloadArtifactToOutputs(
+      const artifact = await this._downloadArtifactToOutputs(
         token,
         repo,
         run.id,
@@ -606,8 +606,37 @@ export class AndroidGithubBuildManager {
         options.format || 'apk'
       );
 
+      const outLabel = (artifact && artifact.outDirRel) || 'app/build/outputs';
+      const fileName = (artifact && artifact.fileName) || 'app-release.apk';
+      const fullUrl = artifact && artifact.fullUrl;
+
       this.ui.showResult?.(true, {
-        message: 'GitHub build OK — saved under app/build/outputs',
+        message: 'GitHub build OK — ' + outLabel,
+        originalPath: fullUrl || outLabel,
+        apkName: fileName,
+        onDownload: async () => {
+          try {
+            window.toast('Saving to Download…', 2000);
+            let saved;
+            if (artifact && artifact.bytes && artifact.b64) {
+              saved = await this._copyBytesToDownloads(
+                artifact.fileName,
+                artifact.b64,
+                artifact.bytes
+              );
+            } else if (fullUrl) {
+              saved = await this._copyProjectFileToDownloads(fullUrl, fileName);
+            } else {
+              throw new Error('No output file to save');
+            }
+            window.toast('Saved to Download/' + (saved.fileName || fileName), 3500);
+            this._log('User saved to Download/' + (saved.fileName || fileName) + '\n');
+          } catch (err) {
+            console.error(err);
+            window.toast('Save failed: ' + (err.message || err), 4000);
+            this._log('Save to Download failed: ' + (err.message || err) + '\n');
+          }
+        },
       });
       this._log('Done. Check app/build/outputs/\n');
       window.toast('GitHub build complete', 3000);
@@ -1315,14 +1344,97 @@ export class AndroidGithubBuildManager {
     await this._writeBinaryFile(cur, fileName, b64, extracted.bytes);
     this._log(`Saved APK/AAB → ${outDirRel}/${fileName} (${extracted.bytes.byteLength} bytes)\n`);
 
-    // Also copy to public Downloads for easy install
+    const result = {
+      fileName,
+      dirUrl: cur,
+      fullUrl: String(cur).replace(/\/+$/, '') + '/' + fileName,
+      outDirRel: outDirRel + '/' + fileName,
+      bytes: extracted.bytes,
+      b64,
+    };
+
+    // Best-effort auto copy (button still available if this fails)
     try {
-      const dlRoot = 'file:///storage/emulated/0/Download';
-      await this._writeBinaryFile(dlRoot, fileName, b64, extracted.bytes);
+      await this._copyBytesToDownloads(fileName, b64, extracted.bytes);
       this._log(`Also copied to Download/${fileName}\n`);
     } catch (e) {
-      this._log(`Download folder copy skipped: ${e.message}\n`);
+      this._log(`Download folder auto-copy skipped: ${e.message}\n`);
     }
+    return result;
+  }
+
+  /**
+   * Copy APK/AAB into public Download via Acode fs (multiple candidate roots).
+   */
+  async _copyBytesToDownloads(fileName, b64, bytes) {
+    const fs = acode.require('fs') || acode.require('fsOperation');
+    const roots = [
+      'file:///storage/emulated/0/Download',
+      'file:///sdcard/Download',
+      'file:///storage/emulated/0/Downloads',
+      'file:///sdcard/Downloads',
+    ];
+    let lastErr = null;
+    let destName = fileName;
+    for (const root of roots) {
+      try {
+        // unique name if exists
+        let name = fileName;
+        let n = 1;
+        const base = fileName.includes('.')
+          ? fileName.slice(0, fileName.lastIndexOf('.'))
+          : fileName;
+        const ext = fileName.includes('.')
+          ? fileName.slice(fileName.lastIndexOf('.'))
+          : '';
+        while (await fs(root + '/' + name).exists().catch(() => false)) {
+          name = `${base} (${n})${ext}`;
+          n++;
+        }
+        destName = name;
+        await this._writeBinaryFile(root, name, b64, bytes);
+        return { root, fileName: name, url: root + '/' + name };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('Could not write to Download folder');
+  }
+
+  /**
+   * Copy an already-saved project output file into Download.
+   */
+  async _copyProjectFileToDownloads(fileUrl, fileName) {
+    const fs = acode.require('fs') || acode.require('fsOperation');
+    const url = String(fileUrl || '');
+    let raw = null;
+    try {
+      raw = await fs(url).readFile('base64');
+    } catch (_) {
+      try {
+        raw = await fs(url).readFile();
+      } catch (e2) {
+        throw new Error('Cannot read output file: ' + (e2.message || e2));
+      }
+    }
+    let b64;
+    let bytes;
+    if (typeof raw === 'string') {
+      b64 = raw.replace(/\s/g, '');
+      // decode for write verification path
+      const bin = atob(b64);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
+    } else {
+      bytes =
+        raw instanceof ArrayBuffer
+          ? new Uint8Array(raw)
+          : raw instanceof Uint8Array
+            ? raw
+            : new Uint8Array(raw.buffer || raw);
+      b64 = this._bytesToBase64(bytes);
+    }
+    return this._copyBytesToDownloads(fileName || url.split('/').pop(), b64, bytes);
   }
 
   _bytesToBase64(u8) {

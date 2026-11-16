@@ -1,4 +1,14 @@
 
+## v1.1.6 
+
+- New : SVG Studio , Edit svg from svg store OR select svg from local and Use in Your Android Project App
+  
+  ![svg_studio](https://i.postimg.cc/7HMJfhk2/Android-builder-pro-SVG-Studio.jpg)
+
+- Fixed : Git Build Error after using custom icon
+- Fixed : Other minor bugs
+- Enhanched Ui (minor)
+
 ## v1.1.5
 
 ### Icon Studio (Upgrade)
@@ -7,12 +17,12 @@
 - Icon Store
 - fix : Mipmap icon not using on git build
 
-![Image_Icon_Add](https://i.postimg.cc/cL37p23c/Screenshot-2026-10-31-11-44-53-53-e3c1f266f17b29c7b40472751f031275.jpg)
+  ![Image_Icon_Add](https://i.postimg.cc/cL37p23c/Screenshot-2026-10-31-11-44-53-53-e3c1f266f17b29c7b40472751f031275.jpg)
 
 ### Splash Studio (new)
 - Light/Dark bg, gradient, logo, Android 12+ theme, duration, exit animation
 
-![Splash_Studio](https://i.postimg.cc/zv32K7c6/Screenshot-2026-10-31-12-01-40-55-e3c1f266f17b29c7b40472751f031275.jpg)
+  ![Splash_Studio](https://i.postimg.cc/zv32K7c6/Screenshot-2026-10-31-12-01-40-55-e3c1f266f17b29c7b40472751f031275.jpg)
 
 ### More 
 - fix : GitHub / Build (earlier) - binary (PNG) push
@@ -52,7 +62,7 @@ Install the companion app for **real on-device XML layout preview**:
 
 **Download:** [Layout.Preview.Host.apk](https://github.com/Sou6900/XHLP_Engine/releases/download/v0.0.1/Layout.Preview.Host.apk)
 
-![Xml layout preview](https://i.postimg.cc/yxS19ZJf/Screenshot-2026-09-23-18-27-56-66-99c04817c0de5652397fc8b56c3b3817.jpg)
+  ![Xml layout preview](https://i.postimg.cc/yxS19ZJf/Screenshot-2026-09-23-18-27-56-66-99c04817c0de5652397fc8b56c3b3817.jpg)
 
 
 Check description to `Layout Preview Host (APK)` for more details

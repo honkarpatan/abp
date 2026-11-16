@@ -351,40 +351,111 @@ export class BuildManager {
 
   async handleSuccess(apkUrl) {
     const apkName = apkUrl.split('/').pop();
-    this.ui.showResult(true,
-      {
-        apkName: apkName,
-        originalPath: apkUrl,
-        onDownload: async () => {
-          const fs = acode.require('fs');
-          const sourcePath = apkUrl.replace('file://', '');
+    this.ui.showResult(true, {
+      apkName: apkName,
+      originalPath: apkUrl,
+      onDownload: async () => {
+        const fs = acode.require('fs') || acode.require('fsOperation');
+        const srcUrl = apkUrl.startsWith('file://') ? apkUrl : 'file://' + apkUrl;
+        const roots = [
+          'file:///storage/emulated/0/Download',
+          'file:///sdcard/Download',
+          'file:///storage/emulated/0/Downloads',
+          'file:///sdcard/Downloads',
+        ];
+
+        const uniqueName = async (root, name) => {
+          let dest = name;
+          let n = 1;
+          const dot = name.lastIndexOf('.');
+          const base = dot > 0 ? name.slice(0, dot) : name;
+          const ext = dot > 0 ? name.slice(dot) : '';
+          while (await fs(root + '/' + dest).exists().catch(() => false)) {
+            dest = `${base} (${n})${ext}`;
+            n++;
+          }
+          return dest;
+        };
+
+        window.toast('Saving to Download…', 2000);
+
+        // 1) Pure FS copy (read source → write Download)
+        try {
+          let raw = null;
+          try {
+            raw = await fs(srcUrl).readFile('base64');
+          } catch (_) {
+            raw = await fs(srcUrl).readFile();
+          }
+          let data = raw;
+          let lastErr = null;
+          for (const root of roots) {
+            try {
+              const name = await uniqueName(root, apkName);
+              const dest = root + '/' + name;
+              if (typeof data === 'string') {
+                try {
+                  await fs(dest).writeFile(data, 'base64');
+                } catch (_) {
+                  await fs(root).createFile(name, data, { encoding: 'base64' });
+                }
+              } else {
+                const u8 =
+                  data instanceof Uint8Array
+                    ? data
+                    : data instanceof ArrayBuffer
+                      ? new Uint8Array(data)
+                      : new Uint8Array(data.buffer || data);
+                try {
+                  if (await fs(dest).exists().catch(() => false)) await fs(dest).writeFile(u8);
+                  else await fs(root).createFile(name, u8);
+                } catch (_) {
+                  await fs(root).createFile(name, u8, { overwrite: true });
+                }
+              }
+              if (await fs(dest).exists().catch(() => false)) {
+                window.toast('Saved to Download/' + name, 3500);
+                return;
+              }
+            } catch (e) {
+              lastErr = e;
+            }
+          }
+          if (lastErr) throw lastErr;
+        } catch (fsErr) {
+          console.warn('FS save failed, trying shell cp', fsErr);
+        }
+
+        // 2) Fallback: shell cp
+        try {
+          const sourcePath = srcUrl.replace('file://', '');
           let destFileName = apkName;
           let destPath = `/sdcard/Download/${destFileName}`;
           let counter = 1;
-
-          while (await fs(`file://${destPath}`).exists()) {
+          while (await fs(`file://${destPath}`).exists().catch(() => false)) {
             const namePart = apkName.substring(0, apkName.lastIndexOf('.'));
             const extPart = apkName.substring(apkName.lastIndexOf('.'));
             destFileName = `${namePart} (${counter})${extPart}`;
             destPath = `/sdcard/Download/${destFileName}`;
             counter++;
           }
-          window.toast(`Saving as: ${destFileName}`, 2000);
-          const cmd = `cp -f "${sourcePath}" "${destPath}"\r`;
+          const cmd = `cp -f "${sourcePath}" "${destPath}"`;
           await writeShared(cmd);
           setTimeout(async () => {
-            if (await fs(`file://${destPath}`).exists()) {
-              window.toast(`Saved to Downloads successfully`, 3000);
+            if (await fs(`file://${destPath}`).exists().catch(() => false)) {
+              window.toast('Saved to Download/' + destFileName, 3500);
             } else {
-              window.toast("Save Failed! Permission denied?", 4000);
+              window.toast('Save failed — check storage permission', 4000);
             }
-          },
-            2000);
+          }, 2000);
+        } catch (e) {
+          window.toast('Save failed: ' + (e.message || e), 4000);
         }
-      });
+      },
+    });
   }
 
-  async handleFailure(logUrl) {
+async handleFailure(logUrl) {
     this.ui.showResult(false, {
       logPath: logUrl.replace('file://',
         ''),
